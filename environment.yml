@@ -1,0 +1,8 @@
+name: mcsplicer
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python>=3.6
+  - numpy>=1.15.4
+  - matplotlib>=3.0

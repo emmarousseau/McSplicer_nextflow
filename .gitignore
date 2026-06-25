@@ -1,0 +1,10 @@
+.nextflow/
+.nextflow.log*
+work/
+results/
+results_test/
+.DS_Store
+__pycache__/
+*.pyc
+examples/
+results_alchemab/
