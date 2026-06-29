@@ -25,6 +25,7 @@ params.input            = null
 params.outdir           = './results'
 params.read_len         = 151
 params.gene_id          = ''
+params.gene_list        = ''
 params.prefix           = ''
 params.bootstraps       = 0
 params.anno             = 'n'

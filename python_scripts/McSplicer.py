@@ -3,6 +3,7 @@ import os,sys,math,operator
 import os.path
 from os import listdir
 from collections import defaultdict
+from multiprocessing import Pool, cpu_count
 import numpy as np
 from subpath_info import *
 from compute_f00_f01_f10_f11 import *
@@ -165,7 +166,7 @@ def get_q_vector_from_junction_reads(strand_dir,subexon_ids_dict,loc_list,end_si
 # In[6]:
 
 
-def run_EM_bootstrap( cnt_file, gene_id, no_steps, read_length,gene_datalist,disable_end_sites_computation,add_start_stop_nodes):
+def run_EM_bootstrap( cnt_file, gene_id, no_steps, read_length,gene_datalist,disable_end_sites_computation,add_start_stop_nodes, parsed_cnt=None):
 
     ######################  Step 1: Read gtf file
 
@@ -196,7 +197,12 @@ def run_EM_bootstrap( cnt_file, gene_id, no_steps, read_length,gene_datalist,dis
     ######################  Step 2: Read cnt file and get all subpaths list that belong to this gene
     p_arr_list = []
     q_arr_list = []
-    subpath_list, subpath_freq_list = parse_cnt_file(cnt_file)
+    if parsed_cnt is not None:
+        # Use pre-parsed cnt data (avoid re-reading file for every gene)
+        subpath_list = [sp[:] for sp in parsed_cnt[0]]
+        subpath_freq_list = list(parsed_cnt[1])
+    else:
+        subpath_list, subpath_freq_list = parse_cnt_file(cnt_file)
     subpath_list, subpath_freq_list = filter_subpath_list_by_subexon_ids(subpath_list, subpath_freq_list, list(subexon_ids_dict.keys()))
 
 
@@ -498,7 +504,7 @@ def get_args():
     parser.add_argument('--out_dir', type=str, required=True,help='Output directory prefix.')
     parser.add_argument('--read_len', type=str, help='Input read length.', required=True)
     parser.add_argument('--gene_id', type=str, help='Input gene ID, use this parameter when running McSplicer on a single gene. Default, run on all genes provided in the gtf annotation file.', default = '' ,required=False)
-    #parser.add_argument('--gene_list', type=str, help='Input file with gene IDs, where each gene ID is written in a separate line, e.g., gene1\\ngene2\\ngene3, use this parameter when running McSplicer on multiple genes.', default = '',required=False)
+    parser.add_argument('--gene_list', type=str, help='Input file with gene IDs (one per line), or comma-separated gene IDs.', default = '',required=False)
     parser.add_argument('--bootstraps', type=int, default="0",help='Number of bootstraps')
     parser.add_argument('--prefix', type=str, default="", help='Output file prefix.')
     parser.add_argument('--anno', type=str, default="n", help='y/n, if y the output file contains the mapping between splice site index and a list of transcript IDs which included this splice site.')
@@ -526,12 +532,47 @@ def read_gene_list_from_file(gene_ids_file):
 
 
 
+_shared_parsed_cnt = None
+
+def _pool_initializer(parsed_cnt):
+    """Set shared parsed_cnt data in each worker process (avoids pickling per task)."""
+    global _shared_parsed_cnt
+    _shared_parsed_cnt = parsed_cnt
+
+
+def _process_gene(args):
+    """Worker function for parallel gene processing."""
+    gene_id, gene_datalist, cnt_file, no_steps, read_length, \
+        disable_end_sites_computation, add_start_stop_nodes, \
+        out_dir, out_prefix, ss_tx_dict, anno_FLAG = args
+
+    np.random.seed(42)  # reproducibility per gene
+
+    if not gene_datalist:
+        return gene_id, False, 'No entry in refined gtf'
+
+    start_sites_dict, end_sites_dict, p_arr_list, q_arr_list = run_EM_bootstrap(
+        cnt_file, gene_id, no_steps, read_length, gene_datalist,
+        disable_end_sites_computation, add_start_stop_nodes, parsed_cnt=_shared_parsed_cnt)
+
+    if len(start_sites_dict) > 0:
+        chr_id = gene_datalist[0][-1]
+        strand = gene_datalist[0][1]
+        output_f, idx_pos_d = write_output(
+            gene_id, start_sites_dict, end_sites_dict, p_arr_list, q_arr_list,
+            out_dir, no_steps, out_prefix, add_start_stop_nodes, chr_id, strand,
+            ss_tx_dict, anno_FLAG)
+        return gene_id, True, output_f
+    else:
+        return gene_id, False, 'No counts found'
+
+
 if __name__ == "__main__":
 
     params = vars(get_args())
     gtf_file = params['gtf']
     cnt_file = params['count_file']
-    #input_gene_ids_file = params['gene_list']
+    gene_list_input = params['gene_list']
     gene_id = params['gene_id']
     out_dir = params['out_dir']
     read_length = int(params['read_len'])
@@ -541,59 +582,77 @@ if __name__ == "__main__":
     disable_end_sites_computation = True
     add_start_stop_nodes = True
 
-    
-    
+
+
     anno_FLAG = False
     ss_tx_dict = {}
     if anno.lower() == 'y':
         anno_FLAG = True
-        
+
     gene_list = []
 
-    #if input_gene_ids_file != '':
-        #gene_list = read_gene_list(input_gene_ids_file)
+    # Parse gene list from file or comma-separated string
+    if gene_list_input != '':
+        if os.path.isfile(gene_list_input):
+            with open(gene_list_input) as f:
+                gene_list = [line.strip() for line in f if line.strip()]
+        else:
+            gene_list = [g.strip() for g in gene_list_input.split(',')]
 
     all_gene_dict,ss_tx_dict = get_all_genes_dict(gtf_file,anno_FLAG) # all gene data dictionary
 
+    # Parse the .cnt file ONCE upfront (avoids re-reading per gene)
+    print('Parsing count file...')
+    parsed_cnt = parse_cnt_file(cnt_file)
+    print(f'  Loaded {len(parsed_cnt[0])} subpaths from {cnt_file}')
+
     if gene_id != '':
         gene_list.append(gene_id)
-    else:
+    elif len(gene_list) == 0:
         gene_list = [gene_id for gene_id in all_gene_dict]
-        
 
+    # Create output directories upfront
+    os.makedirs(out_dir, exist_ok=True)
 
+    # Filter to genes present in the dict
+    gene_list = [g for g in gene_list if g in all_gene_dict]
 
+    # Number of parallel workers
+    # When Nextflow runs multiple samples concurrently, keep per-sample workers modest
+    n_workers = min(cpu_count() // 2, 8)
 
-    for gene_id in gene_list:
-        if not os.path.exists(out_dir):
-            os.system('mkdir -p %s'%out_dir)
+    if len(gene_list) == 1 or n_workers <= 1:
+        # Serial mode for single gene or single core
+        for gid in gene_list:
+            print('Running McSplicer on gene id', gid, '...')
+            gene_datalist = all_gene_dict[gid]
+            if not gene_datalist:
+                print('No entry found for the gene %s in the provided refined gtf file %s.'%(gid,gtf_file))
+                continue
+            start_sites_dict, end_sites_dict, p_arr_list, q_arr_list = run_EM_bootstrap(cnt_file, gid, no_steps, read_length,gene_datalist,disable_end_sites_computation,add_start_stop_nodes, parsed_cnt=parsed_cnt)
+            if len(start_sites_dict) > 0:
+                chr_id = gene_datalist[0][-1]
+                strand = gene_datalist[0][1]
+                output_f,idx_pos_d = write_output(gid, start_sites_dict, end_sites_dict, p_arr_list, q_arr_list, out_dir, no_steps,out_prefix,add_start_stop_nodes,chr_id,strand,ss_tx_dict,anno_FLAG)
+                print('\tOutput is written to the folder',output_f)
+            else:
+                print('\tNo counts are found for gene', gid)
+    else:
+        # Parallel mode
+        print(f'Running McSplicer on {len(gene_list)} genes using {n_workers} workers...')
+        work_items = [
+            (gid, all_gene_dict[gid], cnt_file, no_steps, read_length,
+             disable_end_sites_computation, add_start_stop_nodes,
+             out_dir, out_prefix, ss_tx_dict, anno_FLAG)
+            for gid in gene_list
+        ]
 
-        if gene_id not in all_gene_dict:
-            print('Gene %s not found in the provided refined gtf.'%gene_id)
-            continue
+        completed = 0
+        with Pool(processes=n_workers, initializer=_pool_initializer, initargs=(parsed_cnt,)) as pool:
+            for gene_id_result, success, msg in pool.imap_unordered(_process_gene, work_items, chunksize=50):
+                completed += 1
+                if completed % 1000 == 0:
+                    print(f'  Processed {completed}/{len(gene_list)} genes...')
 
-
-        print('Running McSplicer on gene id',gene_id,'...')
-
-        gene_datalist = all_gene_dict[gene_id]
-
-
-        if not gene_datalist:
-            print('No entry found for the gene %s in the provided refined gtf file %s.'%(gene_id,gtf_file))
-            continue
-
-        start_sites_dict, end_sites_dict, p_arr_list, q_arr_list = run_EM_bootstrap(cnt_file, gene_id, no_steps, read_length,gene_datalist,disable_end_sites_computation,add_start_stop_nodes)
-
-
-        if len(start_sites_dict) > 0:
-            chr_id = gene_datalist[0][-1]
-            strand = gene_datalist[0][1]
-            output_f,idx_pos_d = write_output(gene_id, start_sites_dict, end_sites_dict, p_arr_list, q_arr_list, out_dir, no_steps,out_prefix,add_start_stop_nodes,chr_id,strand,ss_tx_dict,anno_FLAG)
-            
-            #if anno_FLAG and len(ss_tx_dict.keys()) > 0:
-                #write_annotation_out(gene_id,strand,ss_tx_dict,idx_pos_d,out_dir)
-
-            print('\tOutput is written to the folder',output_f)
-        else:
-            print('\tNo counts are found for gene', gene_id)
+        print(f'Done. Processed {completed} genes.')
 
