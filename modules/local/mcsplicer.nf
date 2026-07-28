@@ -14,7 +14,7 @@ process MCSPLICER {
     def gene_id_arg   = meta.gene_id    ? "--gene_id ${meta.gene_id}"          : ''
     def gene_list_arg = params.gene_list ? "--gene_list ${params.gene_list}"    : ''
     def prefix_arg    = meta.prefix     ? "--prefix ${meta.prefix}"            : ''
-    def bootstrap_arg = meta.bootstraps > 0 ? "--bootstraps ${meta.bootstraps}" : ''
+    def bootstrap_arg = meta.bootstraps.toInteger() > 0 ? "--bootstraps ${meta.bootstraps}" : ''
     def anno_arg      = meta.anno == 'y' ? "--anno y"                          : ''
     """
     python3 ${projectDir}/python_scripts/McSplicer.py \\
