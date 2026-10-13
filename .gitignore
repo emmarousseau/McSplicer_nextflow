@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 examples/
 results_alchemab/
+*.bam
+*.bai
+reference/*.gtf.gz
+reference/panel/panel_genes.gtf

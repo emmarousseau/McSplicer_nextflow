@@ -404,7 +404,7 @@ def write_output(gene_id, start_sites_dict, end_sites_dict, p_arr_list, q_arr_li
     sorted_ss_dict = sorted(list(start_sites_dict.items()), key=operator.itemgetter(1))
     sorted_es_dict = sorted(list(end_sites_dict.items()), key=operator.itemgetter(1))
 
-    out_DIR = '/'.join([out_DIR,chr_id]) + "/"
+    out_DIR = out_DIR + "/"
 
     if  out_prefix == '':
         out_filename = out_DIR + gene_id+'.csv'
