@@ -8,7 +8,7 @@ process MCSPLICER {
     tuple val(meta), path(refined_gtf), path(cnt_file)
 
     output:
-    tuple val(meta), path("output/**/*.csv"), emit: results
+    tuple val(meta), path("output/*.csv"), emit: results
 
     script:
     def gene_id_arg   = meta.gene_id    ? "--gene_id ${meta.gene_id}"          : ''
@@ -31,7 +31,7 @@ process MCSPLICER {
 
     stub:
     """
-    mkdir -p output/chr1
-    touch output/chr1/test_gene.csv
+    mkdir -p output
+    touch output/test_gene.csv
     """
 }
